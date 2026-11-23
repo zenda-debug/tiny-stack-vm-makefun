@@ -1,4 +1,4 @@
-import {mkdirSync,readdirSync,readFileSync,writeFileSync}from'node:fs';
+import{mkdirSync,readdirSync,readFileSync,writeFileSync}from'node:fs';
 import{join}from'node:path';
 const I=process.env.MAKEFUN_INPUT_DIR??'/input',O=process.env.MAKEFUN_OUTPUT_DIR??'/output';
 function run(p,input){
@@ -10,9 +10,10 @@ function run(p,input){
  const imm=(n,s)=>{
   if(pc+n>p.length){tr(9);return}
   let v=0;for(let i=0;i<n;i++)v|=p[pc+i]<<(8*i);pc+=n;
-  return s?n===1?v<<24>>24:n===2?v<<16>>16:v|0:v;
+  return s?n===4?v|0:v<<(32-8*n)>>(32-8*n):v;
  };
  const B=f=>{if(need(2)){const b=st.pop(),a=st.pop(),c=code,v=f(a,b);if(c===code)push(v)}};
+ const D=f=>B((a,b)=>b?f(a,b):(tr(4),0));
  const E=b=>{nout+=b.length;if(nout>65536){tr(11);return}parts.push(b)};
  while(on){
   if(steps++>=1000000){tr(10);break}
@@ -32,11 +33,11 @@ function run(p,input){
    case 7:if(need(3)){let c=st.pop(),b=st.pop(),a=st.pop();push(b);push(c);push(a)}break;
    case 16:B((a,b)=>a+b|0);break;
    case 17:B((a,b)=>a-b|0);break;
-   case 18:B((a,b)=>Math.imul(a,b));break;
-   case 19:B((a,b)=>b?a===-2147483648&&b===-1?a:a/b|0:(tr(4),0));break;
-   case 20:B((a,b)=>b===0?(tr(4),0):b===-1?0:(a%b)|0);break;
-   case 21:B((a,b)=>b===0?(tr(4),0):(a>>>0)/(b>>>0)|0);break;
-   case 22:B((a,b)=>b===0?(tr(4),0):(a>>>0)%(b>>>0)|0);break;
+   case 18:B(Math.imul);break;
+   case 19:D((a,b)=>a===-2147483648&&b===-1?a:a/b|0);break;
+   case 20:D((a,b)=>b===-1?0:a%b|0);break;
+   case 21:D((a,b)=>(a>>>0)/(b>>>0)|0);break;
+   case 22:D((a,b)=>(a>>>0)%(b>>>0)|0);break;
    case 23:if(need(1))push(-st.pop());break;
    case 24:B((a,b)=>a&b);break;
    case 25:B((a,b)=>a|b);break;
@@ -54,7 +55,7 @@ function run(p,input){
    case 52:if(cs.length)pc=cs.pop();else tr(8);break;
    case 64:if(need(1)){let a=st.pop();if(a<0||a>255)tr(6);else push(mem[a])}break;
    case 65:if(need(2)){let a=st.pop(),x=st.pop();if(a<0||a>255)tr(6);else mem[a]=x}break;
-   case 80:if(need(1))E(Buffer.from(String(st.pop())));break;
+   case 80:if(need(1))E(Buffer.from(''+st.pop()));break;
    case 81:if(need(1))E(Buffer.from([st.pop()&255]));break;
    case 82:push(ip<input.length?input[ip++]:-1);break;
    case 83:if(need(1)){code=st.pop()&255;on=false}break;
@@ -64,8 +65,8 @@ function run(p,input){
  return [Buffer.concat(parts),code];
 }
 for(const id of readdirSync(I).sort()){
- const dir=join(I,id);
- const [out,code]=run(readFileSync(join(dir,'program.bin')),readFileSync(join(dir,'input.bin')));
+ const d=join(I,id);
+ const [out,code]=run(readFileSync(join(d,'program.bin')),readFileSync(join(d,'input.bin')));
  const od=join(O,id);mkdirSync(od,{recursive:true});
  writeFileSync(join(od,'stdout.bin'),out);
  writeFileSync(join(od,'exit.txt'),`${code}\n`);
