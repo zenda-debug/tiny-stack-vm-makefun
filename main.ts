@@ -1,118 +1,72 @@
-// Tiny Stack VM entry. Reads /input/<id>/program.bin + input.bin and writes
-// /output/<id>/stdout.bin + exit.txt for every instance.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-
-const I = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-const LIMIT_OUT = 65536;
-const LIMIT_STEPS = 1000000;
-
-function run(prog: Buffer, input: Buffer): { out: Buffer; code: number } {
-  const o: number[] = [];
-  const st: number[] = [];
-  const cs: number[] = [];
-  const mem = new Int32Array(256);
-  let pc = 0, ip = 0, steps = 0, code = 0, running = true;
-
-  const trap = (c: number) => { code = c; running = false; };
-  const pop = (): number => st.length ? st.pop()! : (trap(2), 0);
-  const push = (v: number) => {
-    if (st.length >= 256) { trap(3); return; }
-    st.push(v | 0);
-  };
-  const imm = (n: number, signed = false): number => {
-    if (pc + n > prog.length) { trap(9); return 0; }
-    let v = 0;
-    for (let i = 0; i < n; i++) v |= prog[pc + i] << (8 * i);
-    pc += n;
-    if (signed) return n === 1 ? (v << 24 >> 24) : n === 2 ? (v << 16 >> 16) : (v | 0);
-    return v;
-  };
-  const need = (n: number): boolean => {
-    if (st.length < n) { trap(2); return false; }
-    return true;
-  };
-  const bin = (f: (a: number, b: number) => number) => {
-    if (!need(2)) return;
-    const b = st.pop()!, a = st.pop()!;
-    push(f(a, b));
-  };
-  const write = (bytes: number[]) => {
-    if (o.length + bytes.length > LIMIT_OUT) { trap(11); return; }
-    for (const b of bytes) o.push(b);
-  };
-
-  while (running) {
-    if (steps >= LIMIT_STEPS) { trap(10); break; }
-    if (pc < 0 || pc >= prog.length) { trap(9); break; }
-    const op = prog[pc++];
-    steps++;
-    switch (op) {
-      case 0x00: running = false; break;
-      case 0x01: push(imm(1, true)); break;
-      case 0x02: push(imm(4, true)); break;
-      case 0x03: pop(); break;
-      case 0x04: { if (!need(1)) break; const a = st[st.length - 1]; push(a); break; }
-      case 0x05: { if (!need(2)) break; const b = st.pop()!, a = st.pop()!; push(b); push(a); break; }
-      case 0x06: { if (!need(2)) break; const a = st[st.length - 2]; push(a); break; }
-      case 0x07: { if (!need(3)) break; const c = st.pop()!, b = st.pop()!, a = st.pop()!; push(b); push(c); push(a); break; }
-      case 0x10: bin((a, b) => (a + b) | 0); break;
-      case 0x11: bin((a, b) => (a - b) | 0); break;
-      case 0x12: bin((a, b) => Math.imul(a, b)); break;
-      case 0x13: bin((a, b) => {
-        if (b === 0) { trap(4); return 0; }
-        if (a === -2147483648 && b === -1) return -2147483648;
-        return (a / b) | 0;
-      }); break;
-      case 0x14: bin((a, b) => {
-        if (b === 0) { trap(4); return 0; }
-        if (b === -1) return 0;
-        return (a % b) | 0;
-      }); break;
-      case 0x15: bin((a, b) => {
-        if (b === 0) { trap(4); return 0; }
-        return ((a >>> 0) / (b >>> 0)) | 0;
-      }); break;
-      case 0x16: bin((a, b) => {
-        if (b === 0) { trap(4); return 0; }
-        return ((a >>> 0) % (b >>> 0)) | 0;
-      }); break;
-      case 0x17: { if (!need(1)) break; push(-st.pop()!); break; }
-      case 0x18: bin((a, b) => a & b); break;
-      case 0x19: bin((a, b) => a | b); break;
-      case 0x1a: bin((a, b) => a ^ b); break;
-      case 0x1b: { if (!need(1)) break; push(~st.pop()!); break; }
-      case 0x1c: bin((a, b) => a << (b & 31)); break;
-      case 0x1d: bin((a, b) => a >> (b & 31)); break;
-      case 0x1e: bin((a, b) => a >>> (b & 31)); break;
-      case 0x20: bin((a, b) => a === b ? 1 : 0); break;
-      case 0x21: bin((a, b) => a < b ? 1 : 0); break;
-      case 0x22: bin((a, b) => (a >>> 0) < (b >>> 0) ? 1 : 0); break;
-      case 0x30: { const off = imm(2, true); if (running) pc += off; break; }
-      case 0x31: { const off = imm(2, true); if (!running) break; if (!need(1)) break; if (st.pop() === 0) pc += off; break; }
-      case 0x32: { const off = imm(2, true); if (!running) break; if (!need(1)) break; if (st.pop() !== 0) pc += off; break; }
-      case 0x33: { const t = imm(2); if (!running) break; if (cs.length >= 64) { trap(7); break; } cs.push(pc); pc = t; break; }
-      case 0x34: { if (!cs.length) { trap(8); break; } pc = cs.pop()!; break; }
-      case 0x40: { if (!need(1)) break; const a = st.pop()!; if (a < 0 || a > 255) { trap(6); break; } push(mem[a]); break; }
-      case 0x41: { if (!need(2)) break; const a = st.pop()!, v = st.pop()!; if (a < 0 || a > 255) { trap(6); break; } mem[a] = v; break; }
-      case 0x50: { if (!need(1)) break; const v = st.pop()!; write(String(v).split('').map(c => c.charCodeAt(0))); break; }
-      case 0x51: { if (!need(1)) break; write([st.pop()! & 255]); break; }
-      case 0x52: push(ip < input.length ? input[ip++] : -1); break;
-      case 0x53: { if (!need(1)) break; code = st.pop()! & 255; running = false; break; }
-      default: trap(5); break;
-    }
+import {mkdirSync,readdirSync,readFileSync,writeFileSync}from'node:fs';
+import{join}from'node:path';
+const I=process.env.MAKEFUN_INPUT_DIR??'/input',O=process.env.MAKEFUN_OUTPUT_DIR??'/output';
+function run(p,input){
+ const st=[],cs=[],mem=new Int32Array(256),parts=[];
+ let pc=0,ip=0,steps=0,code=0,on=true,nout=0;
+ const tr=c=>{code=c;on=false};
+ const need=n=>{if(st.length<n){tr(2);return false}return true};
+ const push=v=>{if(st.length>=256){tr(3);return}st.push(v|0)};
+ const imm=(n,s)=>{
+  if(pc+n>p.length){tr(9);return}
+  let v=0;for(let i=0;i<n;i++)v|=p[pc+i]<<(8*i);pc+=n;
+  return s?n===1?v<<24>>24:n===2?v<<16>>16:v|0:v;
+ };
+ const B=f=>{if(need(2)){const b=st.pop(),a=st.pop(),c=code,v=f(a,b);if(c===code)push(v)}};
+ const E=b=>{nout+=b.length;if(nout>65536){tr(11);return}parts.push(b)};
+ while(on){
+  if(steps++>=1000000){tr(10);break}
+  if(pc<0||pc>=p.length){tr(9);break}
+  let op=p[pc++],v;
+  if(op===1||op===2||op>=48&&op<52){
+   v=imm(op===1?1:op===2?4:2,op!==51);
+   if(v===undefined)break;
   }
-  return { out: Buffer.from(o), code };
+  switch(op){
+   case 0:on=false;break;
+   case 1:case 2:push(v);break;
+   case 3:if(need(1))st.pop();break;
+   case 4:if(need(1))push(st[st.length-1]);break;
+   case 5:if(need(2)){let b=st.pop(),a=st.pop();push(b);push(a)}break;
+   case 6:if(need(2))push(st[st.length-2]);break;
+   case 7:if(need(3)){let c=st.pop(),b=st.pop(),a=st.pop();push(b);push(c);push(a)}break;
+   case 16:B((a,b)=>a+b|0);break;
+   case 17:B((a,b)=>a-b|0);break;
+   case 18:B((a,b)=>Math.imul(a,b));break;
+   case 19:B((a,b)=>b?a===-2147483648&&b===-1?a:a/b|0:(tr(4),0));break;
+   case 20:B((a,b)=>b===0?(tr(4),0):b===-1?0:(a%b)|0);break;
+   case 21:B((a,b)=>b===0?(tr(4),0):(a>>>0)/(b>>>0)|0);break;
+   case 22:B((a,b)=>b===0?(tr(4),0):(a>>>0)%(b>>>0)|0);break;
+   case 23:if(need(1))push(-st.pop());break;
+   case 24:B((a,b)=>a&b);break;
+   case 25:B((a,b)=>a|b);break;
+   case 26:B((a,b)=>a^b);break;
+   case 27:if(need(1))push(~st.pop());break;
+   case 28:B((a,b)=>a<<(b&31));break;
+   case 29:B((a,b)=>a>>(b&31));break;
+   case 30:B((a,b)=>a>>>(b&31));break;
+   case 32:B((a,b)=>a===b|0);break;
+   case 33:B((a,b)=>a<b|0);break;
+   case 34:B((a,b)=>(a>>>0)<(b>>>0)|0);break;
+   case 48:pc+=v;break;
+   case 49:case 50:if(need(1)){let c=st.pop();if((op===49)===(c===0))pc+=v}break;
+   case 51:if(cs.length<64){cs.push(pc);pc=v}else tr(7);break;
+   case 52:if(cs.length)pc=cs.pop();else tr(8);break;
+   case 64:if(need(1)){let a=st.pop();if(a<0||a>255)tr(6);else push(mem[a])}break;
+   case 65:if(need(2)){let a=st.pop(),x=st.pop();if(a<0||a>255)tr(6);else mem[a]=x}break;
+   case 80:if(need(1))E(Buffer.from(String(st.pop())));break;
+   case 81:if(need(1))E(Buffer.from([st.pop()&255]));break;
+   case 82:push(ip<input.length?input[ip++]:-1);break;
+   case 83:if(need(1)){code=st.pop()&255;on=false}break;
+   default:tr(5);break;
+  }
+ }
+ return [Buffer.concat(parts),code];
 }
-
-for (const id of readdirSync(I).sort()) {
-  const dir = join(I, id);
-  const prog = readFileSync(join(dir, 'program.bin'));
-  const input = readFileSync(join(dir, 'input.bin'));
-  const { out, code } = run(prog, input);
-  const odir = join(O, id);
-  mkdirSync(odir, { recursive: true });
-  writeFileSync(join(odir, 'stdout.bin'), out);
-  writeFileSync(join(odir, 'exit.txt'), `${code}\n`);
+for(const id of readdirSync(I).sort()){
+ const dir=join(I,id);
+ const [out,code]=run(readFileSync(join(dir,'program.bin')),readFileSync(join(dir,'input.bin')));
+ const od=join(O,id);mkdirSync(od,{recursive:true});
+ writeFileSync(join(od,'stdout.bin'),out);
+ writeFileSync(join(od,'exit.txt'),`${code}\n`);
 }
